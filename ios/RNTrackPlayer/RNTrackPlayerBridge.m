@@ -151,17 +151,4 @@ RCT_EXTERN_METHOD(updateNowPlayingMetadata:(NSDictionary *)metadata
                   resolver:(RCTPromiseResolveBlock)resolve
                   rejecter:(RCTPromiseRejectBlock)reject);
 
-RCT_EXTERN_METHOD(getSleepTimerProgress:(RCTPromiseResolveBlock)resolve
-              rejecter:(RCTPromiseRejectBlock)reject);
-
-RCT_EXTERN_METHOD(setSleepTimer:(double)time
-                  resolver:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject);
-
-RCT_EXTERN_METHOD(sleepWhenActiveTrackReachesEnd:(RCTPromiseResolveBlock)resolve
-                  rejecter:(RCTPromiseRejectBlock)reject);
-
-RCT_EXTERN_METHOD(clearSleepTimer:(RCTPromiseResolveBlock)resolve
-              rejecter:(RCTPromiseRejectBlock)reject);
-
 @end
