@@ -1,7 +1,7 @@
 import { DeviceEventEmitter } from 'react-native';
 
-import { Event, PlaybackState, State } from '../src';
 import type { Track, UpdateOptions } from '../src';
+import { Event, PlaybackState, State } from '../src';
 import { PlaylistPlayer, RepeatMode } from './TrackPlayer';
 import { SetupNotCalledError } from './TrackPlayer/SetupNotCalledError';
 
@@ -92,17 +92,6 @@ export class TrackPlayerModule extends PlaylistPlayer {
     }
   }
 
-  protected async onTrackEnded() {
-    const position = this.element!.currentTime;
-    await super.onTrackEnded();
-
-    this.emitter.emit(Event.PlaybackTrackChanged, {
-      track: this.lastIndex,
-      position,
-      nextTrack: this.currentIndex,
-    });
-  }
-
   protected async onPlaylistEnded() {
     await super.onPlaylistEnded();
     this.emitter.emit(Event.PlaybackQueueEnded, {
@@ -167,15 +156,7 @@ export class TrackPlayerModule extends PlaylistPlayer {
     return this.currentIndex;
   }
 
-  /**
-   * @deprecated
-   * @returns State
-   */
-  public getState(): State {
-    return this.state.state;
-  }
-
   public getPlaybackState(): PlaybackState {
     return this.state;
   }
-};
+}

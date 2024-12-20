@@ -175,11 +175,6 @@ public class RNTrackPlayer: RCTEventEmitter, AudioSessionControllerDelegate {
             self.shouldResumePlaybackAfterInterruptionEnds = autoHandleInterruptions
         }
 
-        // configure wether player waits to play (deprecated)
-        if let waitForBuffer = config["waitForBuffer"] as? Bool {
-            player.automaticallyWaitsToMinimizeStalling = waitForBuffer
-        }
-
         // configure wether control center metdata should auto update
         player.automaticallyUpdateNowPlayingInfo = config["autoUpdateMetadata"] as? Bool ?? true
 
@@ -299,7 +294,7 @@ public class RNTrackPlayer: RCTEventEmitter, AudioSessionControllerDelegate {
             try? audioSessionController.deactivateSession()
             return
         }
-        
+
         // activate the audio session when there is an item to be played
         // and the player has been configured to start when it is ready loading:
         if (player.playWhenReady) {
@@ -695,27 +690,6 @@ public class RNTrackPlayer: RCTEventEmitter, AudioSessionControllerDelegate {
         }
     }
 
-    @objc(getDuration:rejecter:)
-    public func getDuration(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
-        if (rejectWhenNotInitialized(reject: reject)) { return }
-
-        resolve(player.duration)
-    }
-
-    @objc(getBufferedPosition:rejecter:)
-    public func getBufferedPosition(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
-        if (rejectWhenNotInitialized(reject: reject)) { return }
-
-        resolve(player.bufferedPosition)
-    }
-
-    @objc(getPosition:rejecter:)
-    public func getPosition(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
-        if (rejectWhenNotInitialized(reject: reject)) { return }
-
-        resolve(player.currentTime)
-    }
-
     @objc(getProgress:rejecter:)
     public func getProgress(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
         if (rejectWhenNotInitialized(reject: reject)) { return }
@@ -745,14 +719,6 @@ public class RNTrackPlayer: RCTEventEmitter, AudioSessionControllerDelegate {
             Metadata.update(for: player, with: metadata)
         }
 
-        resolve(NSNull())
-    }
-
-    @objc(clearNowPlayingMetadata:rejecter:)
-    public func clearNowPlayingMetadata(resolve: RCTPromiseResolveBlock, reject: RCTPromiseRejectBlock) {
-        if (rejectWhenNotInitialized(reject: reject)) { return }
-
-        player.nowPlayingInfoController.clear()
         resolve(NSNull())
     }
 
@@ -812,12 +778,12 @@ public class RNTrackPlayer: RCTEventEmitter, AudioSessionControllerDelegate {
             ] as [String : Any])
         }
     }
-    
+
     func handleAudioPlayerCommonMetadataReceived(metadata: [AVMetadataItem]) {
         let commonMetadata = MetadataAdapter.convertToCommonMetadata(metadata: metadata, skipRaw: true)
         emit(event: EventType.MetadataCommonReceived, body: ["metadata": commonMetadata])
     }
-    
+
     func handleAudioPlayerChapterMetadataReceived(metadata: [AVTimedMetadataGroup]) {
         let metadataItems = MetadataAdapter.convertToGroupedMetadata(metadataGroups: metadata);
         emit(event: EventType.MetadataChapterReceived, body:  ["metadata": metadataItems])
@@ -826,7 +792,7 @@ public class RNTrackPlayer: RCTEventEmitter, AudioSessionControllerDelegate {
     func handleAudioPlayerTimedMetadataReceived(metadata: [AVTimedMetadataGroup]) {
         let metadataItems = MetadataAdapter.convertToGroupedMetadata(metadataGroups: metadata);
         emit(event: EventType.MetadataTimedReceived, body: ["metadata": metadataItems])
-        
+
         // SwiftAudioEx was updated to return the array of timed metadata
         // Until we have support for that in RNTP, we take the first item to keep existing behaviour.
         let metadata = metadata.first?.items ?? []
@@ -882,16 +848,6 @@ public class RNTrackPlayer: RCTEventEmitter, AudioSessionControllerDelegate {
             a["track"] = track
         }
         emit(event: EventType.PlaybackActiveTrackChanged, body: a)
-
-        // deprecated:
-        var b: Dictionary<String, Any> = ["position": lastPosition ?? 0]
-        if let lastIndex = lastIndex {
-            b["lastIndex"] = lastIndex
-        }
-        if let index = index {
-            b["nextTrack"] = index
-        }
-        emit(event: EventType.PlaybackTrackChanged, body: b)
     }
 
     func handleAudioPlayerSecondElapse(seconds: Double) {

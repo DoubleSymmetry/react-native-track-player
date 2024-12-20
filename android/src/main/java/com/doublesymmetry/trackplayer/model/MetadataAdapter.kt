@@ -1,19 +1,22 @@
 package com.doublesymmetry.trackplayer.model
 
 import android.os.Bundle
-import com.google.android.exoplayer2.MediaMetadata
-import com.google.android.exoplayer2.metadata.Metadata
-import com.google.android.exoplayer2.metadata.flac.VorbisComment
-import com.google.android.exoplayer2.metadata.icy.IcyHeaders
-import com.google.android.exoplayer2.metadata.icy.IcyInfo
-import com.google.android.exoplayer2.metadata.id3.ChapterFrame
-import com.google.android.exoplayer2.metadata.id3.TextInformationFrame
-import com.google.android.exoplayer2.metadata.id3.UrlLinkFrame
-import com.google.android.exoplayer2.metadata.mp4.MdtaMetadataEntry
+import androidx.annotation.OptIn
+import androidx.media3.common.Metadata
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.extractor.metadata.vorbis.VorbisComment
+import androidx.media3.extractor.metadata.icy.IcyHeaders
+import androidx.media3.extractor.metadata.icy.IcyInfo
+import androidx.media3.extractor.metadata.id3.ChapterFrame
+import androidx.media3.extractor.metadata.id3.TextInformationFrame
+import androidx.media3.extractor.metadata.id3.UrlLinkFrame
+import androidx.media3.container.MdtaMetadataEntry
 import timber.log.Timber
 
 sealed class MetadataAdapter {
     companion object {
+        @OptIn(UnstableApi::class)
         fun fromMetadata(metadata: Metadata): List<Bundle> {
             val group = mutableListOf<Bundle>()
 
@@ -30,30 +33,30 @@ sealed class MetadataAdapter {
 
                             when (entry.id.uppercase()) {
                                 "TIT2", "TT2" -> {
-                                    putString("title", entry.value)
+                                    putString("title", entry.values[0])
                                     rawEntry.putString("commonKey", "title")
                                 }
                                 "TALB", "TOAL", "TAL" -> {
-                                    putString("albumName", entry.value)
+                                    putString("albumName", entry.values[0])
                                     rawEntry.putString("commonKey", "albumName")
                                 }
                                 "TOPE", "TPE1", "TP1" -> {
-                                    putString("artist", entry.value)
+                                    putString("artist", entry.values[0])
                                     rawEntry.putString("commonKey", "artist")
                                 }
                                 "TDRC", "TOR" -> {
-                                    putString("creationDate", entry.value)
+                                    putString("creationDate", entry.values[0])
                                     rawEntry.putString("commonKey", "creationDate")
                                 }
                                 "TCON", "TCO" -> {
-                                    putString("genre", entry.value)
+                                    putString("genre", entry.values[0])
                                     rawEntry.putString("commonKey", "genre")
                                 }
                             }
 
                             rawEntry.putString("key", entry.id.uppercase())
                             rawEntry.putString("keySpace", "org.id3")
-                            rawEntry.putString("value", entry.value)
+                            rawEntry.putString("value", entry.values[0])
                             rawEntry.putString("time", "-1")
                             rawEntries.add(rawEntry)
                         }

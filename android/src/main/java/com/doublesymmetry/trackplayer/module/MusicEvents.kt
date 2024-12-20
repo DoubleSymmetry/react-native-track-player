@@ -15,14 +15,13 @@ class MusicEvents(private val reactContext: ReactContext) : BroadcastReceiver() 
         val event = intent.getStringExtra("event")
         val data = intent.getBundleExtra("data")
         val map = if (data != null) Arguments.fromBundle(data) else null
-        reactContext.getJSModule(RCTDeviceEventEmitter::class.java).emit(
-            event!!, map
-        )
+        reactContext.emitDeviceEvent(event!!, map)
     }
 
     companion object {
         // Media Control Events
         const val BUTTON_PLAY = "remote-play"
+        const val BUTTON_PLAY_PAUSE = "remote-play-pause"
         const val BUTTON_PLAY_FROM_ID = "remote-play-id"
         const val BUTTON_PLAY_FROM_SEARCH = "remote-play-search"
         const val BUTTON_PAUSE = "remote-pause"
@@ -35,16 +34,17 @@ class MusicEvents(private val reactContext: ReactContext) : BroadcastReceiver() 
         const val BUTTON_JUMP_FORWARD = "remote-jump-forward"
         const val BUTTON_JUMP_BACKWARD = "remote-jump-backward"
         const val BUTTON_DUCK = "remote-duck"
+        const val BUTTON_BROWSE = "remote-browse"
 
         // Playback Events
         const val PLAYBACK_PLAY_WHEN_READY_CHANGED = "playback-play-when-ready-changed"
         const val PLAYBACK_STATE = "playback-state"
-        const val PLAYBACK_TRACK_CHANGED = "playback-track-changed"
         const val PLAYBACK_ACTIVE_TRACK_CHANGED = "playback-active-track-changed"
         const val PLAYBACK_QUEUE_ENDED = "playback-queue-ended"
         const val PLAYBACK_METADATA = "playback-metadata-received"
         const val PLAYBACK_PROGRESS_UPDATED = "playback-progress-updated"
         const val PLAYBACK_ERROR = "playback-error"
+        const val PLAYBACK_RESUME = "android-playback-resume"
 
         // Metadata Events
         const val METADATA_CHAPTER_RECEIVED = "metadata-chapter-received"
@@ -54,6 +54,8 @@ class MusicEvents(private val reactContext: ReactContext) : BroadcastReceiver() 
 
         // Other
         const val PLAYER_ERROR = "player-error"
+        const val CONNECTOR_CONNECTED = "android-controller-connected"
+        const val CONNECTOR_DISCONNECTED = "android-controller-disconnected"
 
         const val EVENT_INTENT = "com.doublesymmetry.trackplayer.event"
     }

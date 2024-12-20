@@ -10,13 +10,6 @@ export enum Event {
   /**
    * Fired when another track has become active or when there no longer is an
    * active track.
-   *
-   * @deprecated use `playback-active-track-changed` instead.
-   **/
-  PlaybackTrackChanged = 'playback-track-changed',
-  /**
-   * Fired when another track has become active or when there no longer is an
-   * active track.
    **/
   PlaybackActiveTrackChanged = 'playback-active-track-changed',
   /**
@@ -35,10 +28,19 @@ export enum Event {
    **/
   PlaybackProgressUpdated = 'playback-progress-updated',
   /**
+   * Android media3 playback resumption. most likely require a
+   * headless setup.
+   */
+  PlaybackResume = 'android-playback-resume',
+  /**
    * Fired when the user presses the play button.
    * See https://rntp.dev/docs/api/events#remoteplay
    **/
   RemotePlay = 'remote-play',
+  /**
+   * Fired when the user presses the play/pause button.
+   **/
+  RemotePlayPause = 'remote-play-pause',
   /**
    * Fired when the user presses the pause button.
    * See https://rntp.dev/docs/api/events#remotepause
@@ -117,7 +119,11 @@ export enum Event {
    **/
   RemoteSkip = 'remote-skip',
   /**
-   * (iOS only) Fired when chapter metadata is received.
+   * (Android only) Fired when the user enters a browsable children in android auto.
+   * See https://rntp.dev/docs/api/events#remoteBrowse
+   **/
+  RemoteBrowse = 'remote-browse',
+  /** (iOS only) Fired when chapter metadata is received.
    * See https://rntp.dev/docs/api/events#chaptermetadatareceived
    **/
   MetadataChapterReceived = 'metadata-chapter-received',
@@ -131,4 +137,14 @@ export enum Event {
    * See https://rntp.dev/docs/api/events#commonmetadatareceived
    **/
   MetadataCommonReceived = 'metadata-common-received',
+  /**
+   * Fired when an android connector connects to MusicService.
+   * typical controllers are media notification and Android Auto.
+   **/
+  AndroidConnectorConnected = 'android-controller-connected',
+  /**
+   * Fired when an android connector connects to MusicService.
+   * typical controllers are media notification and Android Auto.
+   **/
+  AndroidConnectorDisconnected = 'android-controller-disconnected',
 }

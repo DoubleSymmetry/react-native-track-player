@@ -1,8 +1,8 @@
 import { Player } from './Player';
 
-import type { Track } from '../../src/interfaces';
-import {RepeatMode} from './RepeatMode';
 import { State } from '../../src';
+import type { Track } from '../../src/interfaces';
+import { RepeatMode } from './RepeatMode';
 
 export class PlaylistPlayer extends Player {
   // TODO: use immer to make the `playlist` immutable
@@ -207,8 +207,6 @@ export class PlaylistPlayer extends Player {
   // TODO
   // eslint-disable-next-line @typescript-eslint/no-empty-function
   public updateMetadataForTrack(index: number, metadata: Partial<Track>) {}
-  // eslint-disable-next-line @typescript-eslint/no-empty-function
-  public clearNowPlayingMetadata() {}
   // eslint-disable-next-line @typescript-eslint/no-empty-function
   public updateNowPlayingMetadata(metadata: Partial<Track>) {}
 

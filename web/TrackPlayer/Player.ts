@@ -1,13 +1,13 @@
 import { State } from '../../src/constants/State';
-import type { Track, Progress, PlaybackState } from '../../src/interfaces';
+import type { PlaybackState, Progress, Track } from '../../src/interfaces';
 import { SetupNotCalledError } from './SetupNotCalledError';
 
 export class Player {
-  protected hasInitialized: boolean = false;
+  protected hasInitialized = false;
   protected element?: HTMLMediaElement;
   protected player?: shaka.Player;
   protected _current?: Track = undefined;
-  protected _playWhenReady: boolean = false;
+  protected _playWhenReady = false;
   protected _state: PlaybackState = { state: State.None };
 
   // current getter/setter
@@ -175,16 +175,6 @@ export class Player {
     return this.element.volume;
   }
 
-  public getDuration() {
-    if (!this.element) throw new SetupNotCalledError();
-    return this.element.duration
-  }
-
-  public getPosition() {
-    if (!this.element) throw new SetupNotCalledError();
-    return this.element.currentTime
-  }
-
   public getProgress(): Progress {
     if (!this.element) throw new SetupNotCalledError();
     return {
@@ -192,10 +182,5 @@ export class Player {
       duration: this.element.duration || 0,
       buffered: 0, // TODO: this.element.buffered.end,
     }
-  }
-
-  public getBufferedPosition() {
-    if (!this.element) throw new SetupNotCalledError();
-    return this.element.buffered.end;
   }
 }

@@ -1,22 +1,36 @@
 package com.doublesymmetry.trackplayer.service
 
+import android.annotation.SuppressLint
 import android.app.*
-import android.content.Context
 import android.content.Intent
-import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
-import android.support.v4.media.RatingCompat
+import android.provider.Settings
+import android.view.KeyEvent
 import androidx.annotation.MainThread
-import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationCompat.PRIORITY_LOW
+import androidx.annotation.OptIn
+import androidx.media.utils.MediaConstants
+import androidx.media3.common.C
+import androidx.media3.common.Player
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.session.CacheBitmapLoader
+import androidx.media3.session.LibraryResult
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Rating
+import androidx.media3.common.util.BitmapLoader
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.session.CommandButton
+import androidx.media3.session.MediaSession
+import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionCommands
+import androidx.media3.session.SessionResult
 import com.doublesymmetry.kotlinaudio.models.*
-import com.doublesymmetry.kotlinaudio.models.NotificationButton.*
 import com.doublesymmetry.kotlinaudio.players.QueuedAudioPlayer
-import com.doublesymmetry.trackplayer.R as TrackPlayerR
+import com.doublesymmetry.trackplayer.HeadlessJsMediaService
 import com.doublesymmetry.trackplayer.extensions.NumberExt.Companion.toMilliseconds
 import com.doublesymmetry.trackplayer.extensions.NumberExt.Companion.toSeconds
 import com.doublesymmetry.trackplayer.extensions.asLibState
@@ -29,43 +43,107 @@ import com.doublesymmetry.trackplayer.module.MusicEvents
 import com.doublesymmetry.trackplayer.module.MusicEvents.Companion.METADATA_PAYLOAD_KEY
 import com.doublesymmetry.trackplayer.utils.BundleUtils
 import com.doublesymmetry.trackplayer.utils.BundleUtils.setRating
-import com.facebook.react.HeadlessJsTaskService
+import com.doublesymmetry.trackplayer.utils.CoilBitmapLoader
+import com.doublesymmetry.trackplayer.utils.buildMediaItem
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.jstasks.HeadlessJsTaskConfig
-import com.facebook.react.modules.core.DeviceEventManagerModule
-import com.google.android.exoplayer2.ui.R as ExoPlayerR
+import com.google.common.collect.ImmutableList
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.flow
+import timber.log.Timber
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
-import timber.log.Timber
 
+@OptIn(UnstableApi::class)
 @MainThread
-class MusicService : HeadlessJsTaskService() {
+class MusicService : HeadlessJsMediaService() {
     private lateinit var player: QueuedAudioPlayer
     private val binder = MusicBinder()
     private val scope = MainScope()
+    private lateinit var fakePlayer: ExoPlayer
+    private lateinit var mediaSession: MediaLibrarySession
     private var progressUpdateJob: Job? = null
+    var mediaTree: Map<String, List<MediaItem>> = HashMap()
+    var mediaTreeStyle: List<Int> = listOf(
+        MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM,
+        MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM
+    )
+    private var sessionCommands: SessionCommands? = null
+    private var playerCommands: Player.Commands? = null
+    private var customLayout: List<CommandButton> = listOf()
+    private var lastWake: Long = 0
+    var onStartCommandIntentValid: Boolean = true
 
-    /**
-     * Use [appKilledPlaybackBehavior] instead.
-     */
-    @Deprecated("This will be removed soon")
-    var stoppingAppPausesPlayback = true
-        private set
-
-    enum class AppKilledPlaybackBehavior(val string: String) {
-        CONTINUE_PLAYBACK("continue-playback"), PAUSE_PLAYBACK("pause-playback"), STOP_PLAYBACK_AND_REMOVE_NOTIFICATION("stop-playback-and-remove-notification")
+    fun acquireWakeLock() {
+        acquireWakeLockNow(this)
     }
 
-    private var appKilledPlaybackBehavior = AppKilledPlaybackBehavior.CONTINUE_PLAYBACK
+    fun abandonWakeLock() {
+        sWakeLock?.release()
+    }
+
+    fun getBitmapLoader(): BitmapLoader {
+        return mediaSession.bitmapLoader
+    }
+
+    fun getCurrentBitmap(): ListenableFuture<Bitmap>? {
+        return player.exoPlayer.currentMediaItem?.mediaMetadata?.let {
+            mediaSession.bitmapLoader.loadBitmapFromMetadata(
+                it
+            )
+        }
+    }
+
+    @ExperimentalCoroutinesApi
+    override fun onCreate() {
+        Timber.plant(object : Timber.DebugTree() {
+            override fun createStackElementTag(element: StackTraceElement): String? {
+                return "RNTP-${element.className}:${element.methodName}"
+            }
+        })
+        fakePlayer = ExoPlayer.Builder(this).build()
+        val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            // Add the Uri data so apps can identify that it was a notification click
+            data = Uri.parse("trackplayer://notification.click")
+            action = Intent.ACTION_VIEW
+        }
+        mediaSession = MediaLibrarySession.Builder(this, fakePlayer,
+            InnerMediaSessionCallback()
+        )
+            .setBitmapLoader(CacheBitmapLoader(CoilBitmapLoader(this)))
+            // https://github.com/androidx/media/issues/1218
+            .setSessionActivity(
+                PendingIntent.getActivity(
+                    this,
+                    0,
+                    openAppIntent,
+                    getPendingIntentFlags()
+                )
+            )
+            .build()
+        super.onCreate()
+    }
+
+    enum class AppKilledPlaybackBehavior(val string: String) {
+        CONTINUE_PLAYBACK("continue-playback"),
+        PAUSE_PLAYBACK("pause-playback"),
+        STOP_PLAYBACK_AND_REMOVE_NOTIFICATION("stop-playback-and-remove-notification")
+    }
+
+    private var appKilledPlaybackBehavior =
+        AppKilledPlaybackBehavior.STOP_PLAYBACK_AND_REMOVE_NOTIFICATION
     private var stopForegroundGracePeriod: Int = DEFAULT_STOP_FOREGROUND_GRACE_PERIOD
 
     val tracks: List<Track>
         get() = player.items.map { (it as TrackAudioItem).track }
 
-    val currentTrack
-        get() = (player.currentItem as TrackAudioItem).track
+    val currentTrack: Track?
+        get() {
+            return (player.currentItem as TrackAudioItem?)?.track
+        }
 
     val state
         get() = player.playerState
@@ -80,7 +158,7 @@ class MusicService : HeadlessJsTaskService() {
         get() = player.playbackError
 
     val event
-        get() = player.event
+        get() = player.playerEventHolder
 
     var playWhenReady: Boolean
         get() = player.playWhenReady
@@ -89,77 +167,57 @@ class MusicService : HeadlessJsTaskService() {
         }
 
     private var latestOptions: Bundle? = null
-    private var capabilities: List<Capability> = emptyList()
-    private var notificationCapabilities: List<Capability> = emptyList()
-    private var compactCapabilities: List<Capability> = emptyList()
+    private var commandStarted = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startTask(getTaskConfig(intent))
-        startAndStopEmptyNotificationToAvoidANR()
+        onStartCommandIntentValid = intent != null
+        Timber.d("onStartCommand: ${intent?.action}, ${intent?.`package`}")
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            // HACK: this is not supposed to be here. I definitely screwed up. but Why?
+            onMediaKeyEvent(intent)
+        }
+        // HACK: Why is onPlay triggering onStartCommand??
+        if (!commandStarted) {
+            commandStarted = true
+            super.onStartCommand(intent, flags, startId)
+        }
         return START_STICKY
-    }
-
-    /**
-     * Workaround for the "Context.startForegroundService() did not then call Service.startForeground()"
-     * within 5s" ANR and crash by creating an empty notification and stopping it right after. For more
-     * information see https://github.com/doublesymmetry/react-native-track-player/issues/1666
-     */
-    private fun startAndStopEmptyNotificationToAvoidANR() {
-        val notificationManager = this.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            notificationManager.createNotificationChannel(
-                NotificationChannel(getString(TrackPlayerR.string.rntp_temporary_channel_id), getString(TrackPlayerR.string.rntp_temporary_channel_name), NotificationManager.IMPORTANCE_LOW)
-            )
-        }
-
-        val notificationBuilder = NotificationCompat.Builder(this, getString(TrackPlayerR.string.rntp_temporary_channel_id))
-            .setPriority(PRIORITY_LOW)
-            .setCategory(Notification.CATEGORY_SERVICE)
-            .setSmallIcon(ExoPlayerR.drawable.exo_notification_small_icon)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            notificationBuilder.foregroundServiceBehavior = NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE
-        }
-        val notification = notificationBuilder.build()
-        startForeground(EMPTY_NOTIFICATION_ID, notification)
-        @Suppress("DEPRECATION")
-        stopForeground(true)
     }
 
     @MainThread
     fun setupPlayer(playerOptions: Bundle?) {
         if (this::player.isInitialized) {
-            print("Player was initialized. Prevent re-initializing again")
+            print("Player was initialized previously. Preventing reinitialization.")
             return
         }
-
-        val bufferConfig = BufferConfig(
-            playerOptions?.getDouble(MIN_BUFFER_KEY)?.toMilliseconds()?.toInt(),
-            playerOptions?.getDouble(MAX_BUFFER_KEY)?.toMilliseconds()?.toInt(),
-            playerOptions?.getDouble(PLAY_BUFFER_KEY)?.toMilliseconds()?.toInt(),
-            playerOptions?.getDouble(BACK_BUFFER_KEY)?.toMilliseconds()?.toInt(),
-        )
-
-        val cacheConfig = CacheConfig(playerOptions?.getDouble(MAX_CACHE_SIZE_KEY)?.toLong())
-        val playerConfig = PlayerConfig(
+        Timber.d("Setting up player")
+        val options = PlayerOptions(
+            alwaysShowNext = playerOptions?.getBoolean(ALWAYS_SHOW_NEXT, true) ?: true,
+            audioContentType = when (playerOptions?.getString(ANDROID_AUDIO_CONTENT_TYPE)) {
+                "music" -> C.AUDIO_CONTENT_TYPE_MUSIC
+                "speech" -> C.AUDIO_CONTENT_TYPE_SPEECH
+                "sonification" -> C.AUDIO_CONTENT_TYPE_SONIFICATION
+                "movie" -> C.AUDIO_CONTENT_TYPE_MOVIE
+                "unknown" -> C.AUDIO_CONTENT_TYPE_UNKNOWN
+                else -> C.AUDIO_CONTENT_TYPE_MUSIC
+            },
+            bufferOptions = BufferOptions(
+                playerOptions?.getDouble(MIN_BUFFER_KEY)?.toMilliseconds()?.toInt(),
+                playerOptions?.getDouble(MAX_BUFFER_KEY)?.toMilliseconds()?.toInt(),
+                playerOptions?.getDouble(PLAY_BUFFER_KEY)?.toMilliseconds()?.toInt(),
+                playerOptions?.getDouble(BACK_BUFFER_KEY)?.toMilliseconds()?.toInt(),
+            ),
+            cacheSize = playerOptions?.getDouble(MAX_CACHE_SIZE_KEY)?.toLong() ?: 0,
+            handleAudioBecomingNoisy = playerOptions?.getBoolean(HANDLE_NOISY, true) ?: true,
+            handleAudioFocus = playerOptions?.getBoolean(AUTO_HANDLE_INTERRUPTIONS) ?: true,
             interceptPlayerActionsTriggeredExternally = true,
-            handleAudioBecomingNoisy = true,
-            handleAudioFocus = playerOptions?.getBoolean(AUTO_HANDLE_INTERRUPTIONS) ?: false,
-            audioContentType = when(playerOptions?.getString(ANDROID_AUDIO_CONTENT_TYPE)) {
-                "music" -> AudioContentType.MUSIC
-                "speech" -> AudioContentType.SPEECH
-                "sonification" -> AudioContentType.SONIFICATION
-                "movie" -> AudioContentType.MOVIE
-                "unknown" -> AudioContentType.UNKNOWN
-                else -> AudioContentType.MUSIC
-            }
+            skipSilence = playerOptions?.getBoolean(SKIP_SILENCE) ?: false,
+            wakeMode = playerOptions?.getInt(WAKE_MODE, 0) ?: 0
         )
-
-        val automaticallyUpdateNotificationMetadata = playerOptions?.getBoolean(AUTO_UPDATE_METADATA, true) ?: true
-
-        player = QueuedAudioPlayer(this@MusicService, playerConfig, bufferConfig, cacheConfig)
-        player.automaticallyUpdateNotificationMetadata = automaticallyUpdateNotificationMetadata
+        player = QueuedAudioPlayer(this@MusicService, options)
+        fakePlayer.release()
+        mediaSession.player = player.exoPlayer
         observeEvents()
-        setupForegrounding()
     }
 
     @MainThread
@@ -167,83 +225,107 @@ class MusicService : HeadlessJsTaskService() {
         latestOptions = options
         val androidOptions = options.getBundle(ANDROID_OPTIONS_KEY)
 
-        appKilledPlaybackBehavior = AppKilledPlaybackBehavior::string.find(androidOptions?.getString(APP_KILLED_PLAYBACK_BEHAVIOR_KEY)) ?: AppKilledPlaybackBehavior.CONTINUE_PLAYBACK
-
-        BundleUtils.getIntOrNull(androidOptions, STOP_FOREGROUND_GRACE_PERIOD_KEY)?.let { stopForegroundGracePeriod = it }
-
-        // TODO: This handles a deprecated flag. Should be removed soon.
-        options.getBoolean(STOPPING_APP_PAUSES_PLAYBACK_KEY).let {
-            stoppingAppPausesPlayback = options.getBoolean(STOPPING_APP_PAUSES_PLAYBACK_KEY)
-            if (stoppingAppPausesPlayback) {
-                appKilledPlaybackBehavior = AppKilledPlaybackBehavior.PAUSE_PLAYBACK
-            }
+        if (androidOptions?.containsKey(AUDIO_OFFLOAD_KEY) == true) {
+            player.setAudioOffload(androidOptions.getBoolean(AUDIO_OFFLOAD_KEY))
+        }
+        if (androidOptions?.containsKey(SKIP_SILENCE) == true) {
+            player.skipSilence = androidOptions.getBoolean(SKIP_SILENCE)
         }
 
-        ratingType = BundleUtils.getInt(options, "ratingType", RatingCompat.RATING_NONE)
+        appKilledPlaybackBehavior =
+            AppKilledPlaybackBehavior::string.find(
+                androidOptions?.getString(
+                    APP_KILLED_PLAYBACK_BEHAVIOR_KEY
+                )
+            ) ?: AppKilledPlaybackBehavior.CONTINUE_PLAYBACK
 
-        player.playerOptions.alwaysPauseOnInterruption = androidOptions?.getBoolean(PAUSE_ON_INTERRUPTION_KEY) ?: false
+        BundleUtils.getIntOrNull(androidOptions, STOP_FOREGROUND_GRACE_PERIOD_KEY)
+            ?.let { stopForegroundGracePeriod = it }
 
-        capabilities = options.getIntegerArrayList("capabilities")?.map { Capability.values()[it] } ?: emptyList()
-        notificationCapabilities = options.getIntegerArrayList("notificationCapabilities")?.map { Capability.values()[it] } ?: emptyList()
-        compactCapabilities = options.getIntegerArrayList("compactCapabilities")?.map { Capability.values()[it] } ?: emptyList()
-
-        if (notificationCapabilities.isEmpty()) notificationCapabilities = capabilities
-
-        val buttonsList = notificationCapabilities.mapNotNull {
-            when (it) {
-                Capability.PLAY, Capability.PAUSE -> {
-                    val playIcon = BundleUtils.getIconOrNull(this, options, "playIcon")
-                    val pauseIcon = BundleUtils.getIconOrNull(this, options, "pauseIcon")
-                    PLAY_PAUSE(playIcon = playIcon, pauseIcon = pauseIcon)
-                }
-                Capability.STOP -> {
-                    val stopIcon = BundleUtils.getIconOrNull(this, options, "stopIcon")
-                    STOP(icon = stopIcon)
-                }
-                Capability.SKIP_TO_NEXT -> {
-                    val nextIcon = BundleUtils.getIconOrNull(this, options, "nextIcon")
-                    NEXT(icon = nextIcon, isCompact = isCompact(it))
-                }
-                Capability.SKIP_TO_PREVIOUS -> {
-                    val previousIcon = BundleUtils.getIconOrNull(this, options, "previousIcon")
-                    PREVIOUS(icon = previousIcon, isCompact = isCompact(it))
-                }
-                Capability.JUMP_FORWARD -> {
-                    val forwardIcon = BundleUtils.getIcon(this, options, "forwardIcon", TrackPlayerR.drawable.forward)
-                    FORWARD(icon = forwardIcon, isCompact = isCompact(it))
-                }
-                Capability.JUMP_BACKWARD -> {
-                    val backwardIcon = BundleUtils.getIcon(this, options, "rewindIcon", TrackPlayerR.drawable.rewind)
-                    BACKWARD(icon = backwardIcon, isCompact = isCompact(it))
-                }
-                Capability.SEEK_TO -> {
-                    SEEK_TO
-                }
-                else -> { null }
-            }
-        }
-
-        val openAppIntent = packageManager.getLaunchIntentForPackage(packageName)?.apply {
-            flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            // Add the Uri data so apps can identify that it was a notification click
-            data = Uri.parse("trackplayer://notification.click")
-            action = Intent.ACTION_VIEW
-        }
-
-        val accentColor = BundleUtils.getIntOrNull(options, "color")
-        val smallIcon = BundleUtils.getIconOrNull(this, options, "icon")
-        val pendingIntent = PendingIntent.getActivity(this, 0, openAppIntent, getPendingIntentFlags())
-        val notificationConfig = NotificationConfig(buttonsList, accentColor, smallIcon, pendingIntent)
-
-        player.notificationManager.createNotification(notificationConfig)
+        player.alwaysPauseOnInterruption =
+            androidOptions?.getBoolean(PAUSE_ON_INTERRUPTION_KEY) ?: false
+        player.shuffleMode = androidOptions?.getBoolean(SHUFFLE_KEY) ?: false
 
         // setup progress update events if configured
         progressUpdateJob?.cancel()
-        val updateInterval = BundleUtils.getDoubleOrNull(options, PROGRESS_UPDATE_EVENT_INTERVAL_KEY)
+        val updateInterval =
+            BundleUtils.getDoubleOrNull(options, PROGRESS_UPDATE_EVENT_INTERVAL_KEY)
         if (updateInterval != null && updateInterval > 0) {
             progressUpdateJob = scope.launch {
-                progressUpdateEventFlow(updateInterval).collect { emit(MusicEvents.PLAYBACK_PROGRESS_UPDATED, it) }
+                progressUpdateEventFlow(updateInterval).collect {
+                    emit(
+                        MusicEvents.PLAYBACK_PROGRESS_UPDATED,
+                        it
+                    )
+                }
             }
+        }
+        val capabilities =
+            options.getIntegerArrayList("capabilities")?.map { Capability.entries[it] }
+                ?: emptyList()
+        var notificationCapabilities = (
+                options.getIntegerArrayList("notificationCapabilities")
+                    ?: options.getIntegerArrayList("compactCapabilities"))
+            ?.map { Capability.entries[it] } ?: emptyList()
+        if (notificationCapabilities.isEmpty()) notificationCapabilities = capabilities
+
+        val customActions = options.getBundle(CUSTOM_ACTIONS_KEY)
+
+        val playerCommandsBuilder = Player.Commands.Builder().addAll(
+            // HACK: without COMMAND_GET_CURRENT_MEDIA_ITEM, notification cannot be created
+            Player.COMMAND_GET_CURRENT_MEDIA_ITEM,
+            Player.COMMAND_GET_TRACKS,
+            Player.COMMAND_GET_TIMELINE,
+            Player.COMMAND_GET_METADATA,
+            Player.COMMAND_GET_AUDIO_ATTRIBUTES,
+            Player.COMMAND_GET_VOLUME,
+            Player.COMMAND_GET_DEVICE_VOLUME,
+            Player.COMMAND_GET_TEXT,
+            Player.COMMAND_SEEK_TO_MEDIA_ITEM,
+            Player.COMMAND_SET_MEDIA_ITEM,
+            Player.COMMAND_PREPARE,
+            Player.COMMAND_RELEASE,
+        )
+        notificationCapabilities.forEach {
+            when (it) {
+                Capability.PLAY, Capability.PAUSE -> {
+                    playerCommandsBuilder.add(Player.COMMAND_PLAY_PAUSE)
+                }
+
+                Capability.STOP -> {
+                    playerCommandsBuilder.add(Player.COMMAND_STOP)
+                }
+
+                Capability.SEEK_TO -> {
+                    playerCommandsBuilder.add(Player.COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM)
+                }
+
+                else -> {}
+            }
+        }
+        customLayout = CustomCommandButton.entries
+            .filter { notificationCapabilities.contains(it.capability) }
+            .map { c -> c.commandButton }
+        val sessionCommandsBuilder =
+            MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
+        customLayout.forEach { v ->
+            v.sessionCommand?.let { sessionCommandsBuilder.add(it) }
+        }
+
+        sessionCommands = sessionCommandsBuilder.build()
+        playerCommands = playerCommandsBuilder.build()
+
+        if (mediaSession.mediaNotificationControllerInfo != null) {
+            // https://github.com/androidx/media/blob/c35a9d62baec57118ea898e271ac66819399649b/demos/session_service/src/main/java/androidx/media3/demo/session/DemoMediaLibrarySessionCallback.kt#L107
+            mediaSession.setCustomLayout(
+                mediaSession.mediaNotificationControllerInfo!!,
+                customLayout
+            )
+            mediaSession.setAvailableCommands(
+                mediaSession.mediaNotificationControllerInfo!!,
+                sessionCommandsBuilder.build(),
+                playerCommands!!
+            )
         }
     }
 
@@ -269,18 +351,6 @@ class MusicService : HeadlessJsTaskService() {
                 putInt(TRACK_KEY, player.currentIndex)
             }
         }
-    }
-
-    private fun getPendingIntentFlags(): Int {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_CANCEL_CURRENT
-        } else {
-            PendingIntent.FLAG_CANCEL_CURRENT
-        }
-    }
-
-    private fun isCompact(capability: Capability): Boolean {
-        return compactCapabilities.contains(capability)
     }
 
     @MainThread
@@ -392,11 +462,11 @@ class MusicService : HeadlessJsTaskService() {
     }
 
     @MainThread
-    fun getRepeatMode(): RepeatMode = player.playerOptions.repeatMode
+    fun getRepeatMode(): RepeatMode = player.repeatMode
 
     @MainThread
     fun setRepeatMode(value: RepeatMode) {
-        player.playerOptions.repeatMode = value
+        player.repeatMode = value
     }
 
     @MainThread
@@ -427,48 +497,34 @@ class MusicService : HeadlessJsTaskService() {
     }
 
     @MainThread
-    fun updateMetadataForTrack(index: Int, track: Track) {
-        player.replaceItem(index, track.toAudioItem())
+    fun updateMetadataForTrack(index: Int, bundle: Bundle) {
+        tracks[index].let { currentTrack ->
+            currentTrack.setMetadata(reactContext, bundle, 0)
+
+            player.replaceItem(index, currentTrack.toAudioItem())
+        }
     }
 
     @MainThread
-    fun updateNowPlayingMetadata(track: Track) {
-        player.notificationManager.overrideMetadata(track.toAudioItem())
-    }
-
-    @MainThread
-    fun clearNotificationMetadata() {
-        player.notificationManager.hideNotification()
+    fun updateNowPlayingMetadata(bundle: Bundle) {
+        updateMetadataForTrack(player.currentIndex, bundle)
     }
 
     private fun emitPlaybackTrackChangedEvents(
-        index: Int?,
         previousIndex: Int?,
         oldPosition: Double
     ) {
-        val a = Bundle()
-        a.putDouble(POSITION_KEY, oldPosition)
-        if (index != null) {
-            a.putInt(NEXT_TRACK_KEY, index)
-        }
-
-        if (previousIndex != null) {
-            a.putInt(TRACK_KEY, previousIndex)
-        }
-
-        emit(MusicEvents.PLAYBACK_TRACK_CHANGED, a)
-
-        val b = Bundle()
-        b.putDouble("lastPosition", oldPosition)
+        val bundle = Bundle()
+        bundle.putDouble("lastPosition", oldPosition)
         if (tracks.isNotEmpty()) {
-            b.putInt("index", player.currentIndex)
-            b.putBundle("track", tracks[player.currentIndex].originalItem)
+            bundle.putInt("index", player.currentIndex)
+            bundle.putBundle("track", tracks[player.currentIndex].originalItem)
             if (previousIndex != null) {
-                b.putInt("lastIndex", previousIndex)
-                b.putBundle("lastTrack", tracks[previousIndex].originalItem)
+                bundle.putInt("lastIndex", previousIndex)
+                bundle.putBundle("lastTrack", tracks[previousIndex].originalItem)
             }
         }
-        emit(MusicEvents.PLAYBACK_ACTIVE_TRACK_CHANGED, b)
+        emit(MusicEvents.PLAYBACK_ACTIVE_TRACK_CHANGED, bundle)
     }
 
     private fun emitQueueEndedEvent() {
@@ -476,128 +532,6 @@ class MusicService : HeadlessJsTaskService() {
         bundle.putInt(TRACK_KEY, player.currentIndex)
         bundle.putDouble(POSITION_KEY, player.position.toSeconds())
         emit(MusicEvents.PLAYBACK_QUEUE_ENDED, bundle)
-    }
-
-    @Suppress("DEPRECATION")
-    fun isForegroundService(): Boolean {
-        val manager = baseContext.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        for (service in manager.getRunningServices(Int.MAX_VALUE)) {
-            if (MusicService::class.java.name == service.service.className) {
-                return service.foreground
-            }
-        }
-        Timber.e("isForegroundService found no matching service")
-        return false
-    }
-
-    @MainThread
-    private fun setupForegrounding() {
-        // Implementation based on https://github.com/Automattic/pocket-casts-android/blob/ee8da0c095560ef64a82d3a31464491b8d713104/modules/services/repositories/src/main/java/au/com/shiftyjelly/pocketcasts/repositories/playback/PlaybackService.kt#L218
-        var notificationId: Int? = null
-        var notification: Notification? = null
-        var stopForegroundWhenNotOngoing = false
-        var removeNotificationWhenNotOngoing = false
-
-        fun startForegroundIfNecessary() {
-            if (isForegroundService()) {
-                Timber.d("skipping foregrounding as the service is already foregrounded")
-                return
-            }
-            if (notification == null) {
-                Timber.d("can't startForeground as the notification is null")
-                return
-            }
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        notificationId!!,
-                        notification!!,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                    )
-                } else {
-                    startForeground(notificationId!!, notification)
-                }
-                Timber.d("notification has been foregrounded")
-            } catch (error: Exception) {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                    error is ForegroundServiceStartNotAllowedException
-                ) {
-                    Timber.e(
-                        "ForegroundServiceStartNotAllowedException: App tried to start a foreground Service when it was not allowed to do so.",
-                        error
-                    )
-                    emit(MusicEvents.PLAYER_ERROR, Bundle().apply {
-                        putString("message", error.message)
-                        putString("code", "android-foreground-service-start-not-allowed")
-                    });
-                }
-            }
-        }
-
-        scope.launch {
-            val BACKGROUNDABLE_STATES = listOf(
-                AudioPlayerState.IDLE,
-                AudioPlayerState.ENDED,
-                AudioPlayerState.STOPPED,
-                AudioPlayerState.ERROR,
-                AudioPlayerState.PAUSED
-            )
-            val REMOVABLE_STATES = listOf(
-                AudioPlayerState.IDLE,
-                AudioPlayerState.STOPPED,
-                AudioPlayerState.ERROR
-            )
-            val LOADING_STATES = listOf(
-                AudioPlayerState.LOADING,
-                AudioPlayerState.READY,
-                AudioPlayerState.BUFFERING
-            )
-            var stateCount = 0
-            event.stateChange.collect {
-                stateCount++
-                if (it in LOADING_STATES) return@collect;
-                // Skip initial idle state, since we are only interested when
-                // state becomes idle after not being idle
-                stopForegroundWhenNotOngoing = stateCount > 1 && it in BACKGROUNDABLE_STATES
-                removeNotificationWhenNotOngoing = stopForegroundWhenNotOngoing && it in REMOVABLE_STATES
-            }
-        }
-
-        fun shouldStopForeground(): Boolean {
-            return stopForegroundWhenNotOngoing && (removeNotificationWhenNotOngoing || isForegroundService())
-        }
-
-        scope.launch {
-            event.notificationStateChange.collect {
-                when (it) {
-                    is NotificationState.POSTED -> {
-                        Timber.d("notification posted with id=%s, ongoing=%s", it.notificationId, it.ongoing)
-                        notificationId = it.notificationId;
-                        notification = it.notification;
-                        if (it.ongoing) {
-                            if (player.playWhenReady) {
-                                startForegroundIfNecessary()
-                            }
-                        } else if (shouldStopForeground()) {
-                            // Allow the application a grace period to complete any actions
-                            // that may necessitate keeping the service in a foreground state.
-                            // For instance, queuing new media (e.g., related music) after the
-                            // user's queue is complete. This prevents the service from potentially
-                            // being immediately destroyed once the player finishes playing media.
-                            scope.launch {
-                                delay(stopForegroundGracePeriod.toLong() * 1000)
-                                if (shouldStopForeground()) {
-                                    @Suppress("DEPRECATION")
-                                    stopForeground(removeNotificationWhenNotOngoing)
-                                    Timber.d("Notification has been stopped")
-                                }
-                            }
-                        }
-                    }
-                    else -> {}
-                }
-            }
-        }
     }
 
     @MainThread
@@ -616,7 +550,6 @@ class MusicService : HeadlessJsTaskService() {
             event.audioItemTransition.collect {
                 if (it !is AudioItemTransitionReason.REPEAT) {
                     emitPlaybackTrackChangedEvents(
-                        player.currentIndex,
                         player.previousIndex,
                         (it?.oldPosition ?: 0).toSeconds()
                     )
@@ -643,12 +576,14 @@ class MusicService : HeadlessJsTaskService() {
                             emit(MusicEvents.BUTTON_SET_RATING, this)
                         }
                     }
+
                     is MediaSessionCallback.SEEK -> {
                         Bundle().apply {
                             putDouble("position", it.positionMs.toSeconds())
                             emit(MusicEvents.BUTTON_SEEK_TO, this)
                         }
                     }
+
                     MediaSessionCallback.PLAY -> emit(MusicEvents.BUTTON_PLAY)
                     MediaSessionCallback.PAUSE -> emit(MusicEvents.BUTTON_PAUSE)
                     MediaSessionCallback.NEXT -> emit(MusicEvents.BUTTON_SKIP_NEXT)
@@ -656,14 +591,21 @@ class MusicService : HeadlessJsTaskService() {
                     MediaSessionCallback.STOP -> emit(MusicEvents.BUTTON_STOP)
                     MediaSessionCallback.FORWARD -> {
                         Bundle().apply {
-                            val interval = latestOptions?.getDouble(FORWARD_JUMP_INTERVAL_KEY, DEFAULT_JUMP_INTERVAL) ?: DEFAULT_JUMP_INTERVAL
+                            val interval = latestOptions?.getDouble(
+                                FORWARD_JUMP_INTERVAL_KEY,
+                                DEFAULT_JUMP_INTERVAL
+                            ) ?: DEFAULT_JUMP_INTERVAL
                             putInt("interval", interval.toInt())
                             emit(MusicEvents.BUTTON_JUMP_FORWARD, this)
                         }
                     }
+
                     MediaSessionCallback.REWIND -> {
                         Bundle().apply {
-                            val interval = latestOptions?.getDouble(BACKWARD_JUMP_INTERVAL_KEY, DEFAULT_JUMP_INTERVAL) ?: DEFAULT_JUMP_INTERVAL
+                            val interval = latestOptions?.getDouble(
+                                BACKWARD_JUMP_INTERVAL_KEY,
+                                DEFAULT_JUMP_INTERVAL
+                            ) ?: DEFAULT_JUMP_INTERVAL
                             putInt("interval", interval.toInt())
                             emit(MusicEvents.BUTTON_JUMP_BACKWARD, this)
                         }
@@ -739,21 +681,19 @@ class MusicService : HeadlessJsTaskService() {
         return bundle
     }
 
+    @SuppressLint("VisibleForTests")
     @MainThread
-    private fun emit(event: String, data: Bundle? = null) {
-        reactNativeHost.reactInstanceManager.currentReactContext
-            ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-            ?.emit(event, data?.let { Arguments.fromBundle(it) })
+    fun emit(event: String, data: Bundle? = null) {
+        reactContext?.emitDeviceEvent(event, data?.let { Arguments.fromBundle(it) })
     }
 
+    @SuppressLint("VisibleForTests")
     @MainThread
     private fun emitList(event: String, data: List<Bundle> = emptyList()) {
         val payload = Arguments.createArray()
         data.forEach { payload.pushMap(Arguments.fromBundle(it)) }
 
-        reactNativeHost.reactInstanceManager.currentReactContext
-            ?.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
-            ?.emit(event, payload)
+        reactContext?.emitDeviceEvent(event, payload)
     }
 
     override fun getTaskConfig(intent: Intent?): HeadlessJsTaskConfig {
@@ -761,33 +701,106 @@ class MusicService : HeadlessJsTaskService() {
     }
 
     @MainThread
-    override fun onBind(intent: Intent?): IBinder {
-        return binder
+    override fun onBind(intent: Intent?): IBinder? {
+        val intentAction = intent?.action
+        Timber.d("intentAction = $intentAction")
+        return if (intentAction != null) {
+            super.onBind(intent)
+        } else {
+            binder
+        }
+    }
+
+    override fun onUnbind(intent: Intent?): Boolean {
+        val intentAction = intent?.action
+        Timber.d("intentAction = $intentAction")
+        return super.onUnbind(intent)
+    }
+
+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
+        // https://github.com/androidx/media/issues/843#issuecomment-1860555950
+        super.onUpdateNotification(session, true)
     }
 
     @MainThread
     override fun onTaskRemoved(rootIntent: Intent?) {
-        super.onTaskRemoved(rootIntent)
-
-        if (!::player.isInitialized) return
+        onUnbind(rootIntent)
+        Timber.d("isInitialized = ${::player.isInitialized}, appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
+        if (!::player.isInitialized) {
+            mediaSession.release()
+            return
+        }
 
         when (appKilledPlaybackBehavior) {
-            AppKilledPlaybackBehavior.PAUSE_PLAYBACK -> player.pause()
+            AppKilledPlaybackBehavior.PAUSE_PLAYBACK -> {
+                Timber.d("Pausing playback - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
+                player.pause()
+            }
             AppKilledPlaybackBehavior.STOP_PLAYBACK_AND_REMOVE_NOTIFICATION -> {
+                Timber.d("Killing service - appKilledPlaybackBehavior = $appKilledPlaybackBehavior")
+                mediaSession.release()
                 player.clear()
                 player.stop()
-
+                // HACK: the service first stops, then starts, then call onTaskRemove. Why system
+                // registers the service being restarted?
+                player.destroy()
+                scope.cancel()
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                     stopForeground(STOP_FOREGROUND_REMOVE)
                 } else {
                     @Suppress("DEPRECATION")
                     stopForeground(true)
                 }
-
+                onDestroy()
+                // https://github.com/androidx/media/issues/27#issuecomment-1456042326
                 stopSelf()
                 exitProcess(0)
             }
+
             else -> {}
+        }
+    }
+
+    @SuppressLint("VisibleForTests")
+    private fun selfWake(clientPackageName: String): Boolean {
+        val reactActivity = reactContext?.currentActivity
+        if (
+        // HACK: validate reactActivity is present; if not, send wake intent
+            (reactActivity == null || reactActivity.isDestroyed)
+            && Settings.canDrawOverlays(this)
+        ) {
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastWake < 100000) {
+                return false
+            }
+            lastWake = currentTime
+            val activityIntent = packageManager.getLaunchIntentForPackage(packageName)
+            activityIntent!!.data = Uri.parse("trackplayer://service-bound")
+            activityIntent.action = Intent.ACTION_VIEW
+            activityIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            var activityOptions = ActivityOptions.makeBasic()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                activityOptions = activityOptions.setPendingIntentBackgroundActivityStartMode(
+                    ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
+                )
+            }
+            this.startActivity(activityIntent, activityOptions.toBundle())
+            return true
+        }
+        return false
+    }
+
+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaLibrarySession {
+        Timber.d("${controllerInfo.packageName}")
+        return mediaSession
+    }
+
+    fun notifyChildrenChanged() {
+        mediaSession.connectedControllers.forEach { controller ->
+            mediaTree.forEach { it ->
+                mediaSession.notifyChildrenChanged(controller, it.key, it.value.size, null)
+            }
+
         }
     }
 
@@ -798,12 +811,69 @@ class MusicService : HeadlessJsTaskService() {
 
     @MainThread
     override fun onDestroy() {
-        super.onDestroy()
         if (::player.isInitialized) {
+            Timber.d("Releasing media session and destroying player")
+            mediaSession.release()
             player.destroy()
         }
 
         progressUpdateJob?.cancel()
+        super.onDestroy()
+    }
+
+    fun onMediaKeyEvent(intent: Intent?): Boolean? {
+        val keyEvent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java)
+        } else {
+            intent?.getParcelableExtra<KeyEvent>(Intent.EXTRA_KEY_EVENT)
+        }
+
+        if (keyEvent?.action == KeyEvent.ACTION_DOWN) {
+            return when (keyEvent.keyCode) {
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                    emit(MusicEvents.BUTTON_PLAY_PAUSE)
+                    true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_STOP -> {
+                    emit(MusicEvents.BUTTON_STOP)
+                    true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                    emit(MusicEvents.BUTTON_PAUSE)
+                    true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                    emit(MusicEvents.BUTTON_PLAY)
+                    true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_NEXT -> {
+                    emit(MusicEvents.BUTTON_SKIP_NEXT)
+                    true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_PREVIOUS -> {
+                    emit(MusicEvents.BUTTON_SKIP_PREVIOUS)
+                    true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, KeyEvent.KEYCODE_MEDIA_SKIP_FORWARD, KeyEvent.KEYCODE_MEDIA_STEP_FORWARD -> {
+                    emit(MusicEvents.BUTTON_JUMP_FORWARD)
+                    true
+                }
+
+                KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_SKIP_BACKWARD, KeyEvent.KEYCODE_MEDIA_STEP_BACKWARD -> {
+                    emit(MusicEvents.BUTTON_JUMP_BACKWARD)
+                    true
+                }
+
+                else -> null
+            }
+        }
+        return null
     }
 
     @MainThread
@@ -811,10 +881,241 @@ class MusicService : HeadlessJsTaskService() {
         val service = this@MusicService
     }
 
+    private inner class InnerMediaSessionCallback : MediaLibrarySession.Callback {
+        // HACK: I'm sure most of the callbacks were not implemented correctly.
+        // ATM I only care that andorid auto still functions.
+
+        private val rootItem =
+            buildMediaItem(title = "root", mediaId = AA_ROOT_KEY, isPlayable = false)
+        private val forYouItem =
+            buildMediaItem(title = "For You", mediaId = AA_FOR_YOU_KEY, isPlayable = false)
+
+        override fun onDisconnected(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ) {
+            emit(MusicEvents.CONNECTOR_DISCONNECTED, Bundle().apply {
+                putString("package", controller.packageName)
+            })
+            super.onDisconnected(session, controller)
+        }
+
+        // Configure commands available to the controller in onConnect()
+        @OptIn(UnstableApi::class)
+        override fun onConnect(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): MediaSession.ConnectionResult {
+            Timber.d("${controller.packageName}")
+            val isMediaNotificationController = session.isMediaNotificationController(controller)
+            val isAutomotiveController = session.isAutomotiveController(controller)
+            val isAutoCompanionController = session.isAutoCompanionController(controller)
+            emit(MusicEvents.CONNECTOR_CONNECTED, Bundle().apply {
+                putString("package", controller.packageName)
+                putBoolean("isMediaNotificationController", isMediaNotificationController)
+                putBoolean("isAutomotiveController", isAutomotiveController)
+                putBoolean("isAutoCompanionController", isAutoCompanionController)
+            })
+            if (controller.packageName in arrayOf(
+                    "com.android.systemui",
+                    // https://github.com/googlesamples/android-media-controller
+                    "com.example.android.mediacontroller",
+                    // Android Auto
+                    "com.google.android.projection.gearhead"
+                )
+            ) {
+                // HACK: attempt to wake up activity (for legacy APM). if not, start headless.
+                if (!selfWake(controller.packageName)) {
+                    onStartCommand(null, 0, 0)
+                }
+            }
+            return if (
+                isMediaNotificationController ||
+                isAutomotiveController ||
+                isAutoCompanionController
+            ) {
+                MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                    .setCustomLayout(customLayout)
+                    .setAvailableSessionCommands(
+                        sessionCommands
+                            ?: MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+                    )
+                    .setAvailablePlayerCommands(
+                        playerCommands ?: MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS
+                    )
+                    .build()
+            } else {
+                super.onConnect(session, controller)
+            }
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            command: SessionCommand,
+            args: Bundle
+        ): ListenableFuture<SessionResult> {
+            player.forwardingPlayer.let {
+                when (command.customAction) {
+                    CustomCommandButton.JUMP_BACKWARD.customAction -> { it.seekBack() }
+                    CustomCommandButton.JUMP_FORWARD.customAction -> { it.seekForward() }
+                    CustomCommandButton.NEXT.customAction -> { it.seekToNext() }
+                    CustomCommandButton.PREVIOUS.customAction -> { it.seekToPrevious() }
+                }
+            }
+            return super.onCustomCommand(session, controller, command, args)
+        }
+
+        override fun onGetLibraryRoot(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            Timber.d("${browser.packageName}")
+            val rootExtras = Bundle().apply {
+                putBoolean("android.media.browse.CONTENT_STYLE_SUPPORTED", true)
+                putInt("android.media.browse.CONTENT_STYLE_BROWSABLE_HINT", mediaTreeStyle[0])
+                putInt("android.media.browse.CONTENT_STYLE_PLAYABLE_HINT", mediaTreeStyle[1])
+            }
+            val libraryParams = LibraryParams.Builder().setExtras(rootExtras).build()
+            // https://github.com/androidx/media/issues/1731#issuecomment-2411109462
+            val mRootItem = when (browser.packageName) {
+                "com.google.android.googlequicksearchbox" -> {
+                    if (mediaTree[AA_FOR_YOU_KEY] == null) rootItem else forYouItem
+                }
+
+                else -> rootItem
+            }
+            return Futures.immediateFuture(LibraryResult.ofItem(mRootItem, libraryParams))
+        }
+
+        override fun onGetChildren(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            parentId: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            emit(MusicEvents.BUTTON_BROWSE, Bundle().apply { putString("mediaId", parentId) });
+            return Futures.immediateFuture(
+                LibraryResult.ofItemList(
+                    mediaTree[parentId] ?: listOf(),
+                    null
+                )
+            )
+        }
+
+        override fun onGetItem(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            mediaId: String
+        ): ListenableFuture<LibraryResult<MediaItem>> {
+            Timber.d("${browser.packageName}, mediaId = $mediaId")
+            // emit(MusicEvents.BUTTON_PLAY_FROM_ID, Bundle().apply { putString("id", mediaId) })
+            return Futures.immediateFuture(LibraryResult.ofItem(rootItem, null))
+        }
+
+        override fun onSearch(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<Void>> {
+            Timber.d("${browser.packageName}, query = $query")
+            return super.onSearch(session, browser, query, params)
+        }
+
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: MutableList<MediaItem>
+        ): ListenableFuture<MutableList<MediaItem>> {
+            Timber.d("${controller.packageName}, ${mediaItems[0].mediaId}, ${mediaItems.size}")
+            return super.onAddMediaItems(mediaSession, controller, mediaItems)
+        }
+
+        override fun onSetMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: MutableList<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            Timber.d("${controller.packageName}, ${mediaItems[0].toBundle()}")
+            if (mediaItems[0].requestMetadata.searchQuery == null) {
+                emit(MusicEvents.BUTTON_PLAY_FROM_ID, Bundle().apply {
+                    putString("id", mediaItems[0].mediaId)
+                })
+            } else {
+                emit(MusicEvents.BUTTON_PLAY_FROM_SEARCH, Bundle().apply {
+                    putString("query", mediaItems[0].requestMetadata.searchQuery)
+                })
+            }
+            return super.onSetMediaItems(
+                mediaSession,
+                controller,
+                mediaItems,
+                startIndex,
+                startPositionMs
+            )
+        }
+
+        override fun onMediaButtonEvent(
+            session: MediaSession,
+            controllerInfo: MediaSession.ControllerInfo,
+            intent: Intent
+        ): Boolean {
+            return onMediaKeyEvent(intent) ?: super.onMediaButtonEvent(
+                session,
+                controllerInfo,
+                intent
+            )
+        }
+
+        override fun onGetSearchResult(
+            session: MediaLibrarySession,
+            browser: MediaSession.ControllerInfo,
+            query: String,
+            page: Int,
+            pageSize: Int,
+            params: LibraryParams?
+        ): ListenableFuture<LibraryResult<ImmutableList<MediaItem>>> {
+            Timber.d("${browser.packageName}, $query")
+            return super.onGetSearchResult(session, browser, query, page, pageSize, params)
+        }
+
+        override fun onPlaybackResumption(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            emit(MusicEvents.PLAYBACK_RESUME, Bundle().apply {
+                putString("package", controller.packageName)
+            })
+            return super.onPlaybackResumption(mediaSession, controller)
+        }
+
+        override fun onSetRating(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            rating: Rating
+        ): ListenableFuture<SessionResult> {
+            Bundle().apply {
+                setRating(this, "rating", rating)
+                emit(MusicEvents.BUTTON_SET_RATING, this)
+            }
+            return super.onSetRating(session, controller, rating)
+        }
+    }
+
+    private fun getPendingIntentFlags(): Int {
+        return PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_CANCEL_CURRENT
+    }
+
     companion object {
         const val EMPTY_NOTIFICATION_ID = 1
         const val STATE_KEY = "state"
-        const val ERROR_KEY  = "error"
+        const val ERROR_KEY = "error"
         const val EVENT_KEY = "event"
         const val DATA_KEY = "data"
         const val TRACK_KEY = "track"
@@ -838,8 +1139,11 @@ class MusicService : HeadlessJsTaskService() {
 
         const val ANDROID_OPTIONS_KEY = "android"
 
-        const val STOPPING_APP_PAUSES_PLAYBACK_KEY = "stoppingAppPausesPlayback"
+        const val CUSTOM_ACTIONS_KEY = "customActions"
+
         const val APP_KILLED_PLAYBACK_BEHAVIOR_KEY = "appKilledPlaybackBehavior"
+        const val AUDIO_OFFLOAD_KEY = "audioOffload"
+        const val SHUFFLE_KEY = "shuffle"
         const val STOP_FOREGROUND_GRACE_PERIOD_KEY = "stopForegroundGracePeriod"
         const val PAUSE_ON_INTERRUPTION_KEY = "alwaysPauseOnInterruption"
         const val AUTO_UPDATE_METADATA = "autoUpdateMetadata"
@@ -847,6 +1151,15 @@ class MusicService : HeadlessJsTaskService() {
         const val ANDROID_AUDIO_CONTENT_TYPE = "androidAudioContentType"
         const val IS_FOCUS_LOSS_PERMANENT_KEY = "permanent"
         const val IS_PAUSED_KEY = "paused"
+
+        const val HANDLE_NOISY = "androidHandleAudioBecomingNoisy"
+        const val CROSSFADE = "crossfade"
+        const val ALWAYS_SHOW_NEXT = "androidAlwaysShowNext"
+        const val SKIP_SILENCE = "androidSkipSilence"
+        const val WAKE_MODE = "androidWakeMode"
+
+        const val AA_FOR_YOU_KEY = "for-you"
+        const val AA_ROOT_KEY = "/"
 
         const val DEFAULT_JUMP_INTERVAL = 15.0
         const val DEFAULT_STOP_FOREGROUND_GRACE_PERIOD = 5

@@ -1,4 +1,4 @@
-import TrackPlayer from '..';
+import * as TrackPlayer from '../trackPlayer';
 import { State } from '../constants';
 import { usePlayWhenReady } from './usePlayWhenReady';
 import { usePlaybackState } from './usePlaybackState';

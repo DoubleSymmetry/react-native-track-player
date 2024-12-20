@@ -5,7 +5,14 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.support.v4.media.RatingCompat
+import com.doublesymmetry.trackplayer.R
 import com.facebook.react.views.imagehelper.ResourceDrawableIdHelper
+import com.facebook.react.views.imagehelper.ResourceDrawableIdHelper.Companion.instance
+import androidx.media3.common.Rating
+import androidx.media3.common.HeartRating
+import androidx.media3.common.ThumbRating
+import androidx.media3.common.StarRating
+import androidx.media3.common.PercentageRating
 
 /**
  * @author Milen Pivchev @mpivchev
@@ -44,7 +51,7 @@ object BundleUtils {
         if (!data.containsKey(key)) return 0
         val obj = data[key] as? Bundle ?: return 0
         var name = obj.getString("uri")
-        if (name == null || name.isEmpty()) return 0
+        if (name.isNullOrEmpty()) return 0
         name = name.lowercase().replace("-", "_")
         return try {
             name.toInt()
@@ -53,7 +60,7 @@ object BundleUtils {
         }
     }
 
-    fun getIcon(context: Context, options: Bundle, propertyName: String, defaultIcon: Int): Int {
+    private fun getIcon(context: Context, options: Bundle, propertyName: String, defaultIcon: Int): Int {
         if (!options.containsKey(propertyName)) return defaultIcon
 
         val bundle = options.getBundle(propertyName) ?: return defaultIcon
@@ -63,41 +70,45 @@ object BundleUtils {
         return if (icon == 0) defaultIcon else icon
     }
 
+    fun getCustomIcon(context: Context, options: Bundle, propertyName: String, defaultIcon: Int): Int {
+        when (getIntOrNull(options, propertyName)) {
+            0 -> return R.drawable.hearte_24px
+            1 -> return R.drawable.heart_24px
+            2 -> return R.drawable.baseline_repeat_24
+            3 -> return R.drawable.baseline_repeat_one_24
+            4 -> return R.drawable.shuffle_24px
+            5 -> return R.drawable.ifl_24px
+        }
+        return getIcon(context, options, propertyName, defaultIcon)
+    }
+
     fun getIconOrNull(context: Context, options: Bundle, propertyName: String): Int? {
         if (!options.containsKey(propertyName)) return null
 
         val bundle = options.getBundle(propertyName) ?: return null
 
-        val helper = ResourceDrawableIdHelper.getInstance()
+        val helper = instance
         val icon = helper.getResourceDrawableId(context, bundle.getString("uri"))
         return if (icon == 0) null else icon
     }
 
-    fun getRating(data: Bundle?, key: String?, ratingType: Int): RatingCompat? {
-        return if (!data!!.containsKey(key) || ratingType == RatingCompat.RATING_NONE) {
-            RatingCompat.newUnratedRating(ratingType)
-        } else if (ratingType == RatingCompat.RATING_HEART) {
-            RatingCompat.newHeartRating(data.getBoolean(key, true))
-        } else if (ratingType == RatingCompat.RATING_THUMB_UP_DOWN) {
-            RatingCompat.newThumbRating(data.getBoolean(key, true))
-        } else if (ratingType == RatingCompat.RATING_PERCENTAGE) {
-            RatingCompat.newPercentageRating(data.getFloat(key, 0f))
-        } else {
-            RatingCompat.newStarRating(ratingType, data.getFloat(key, 0f))
+    fun getRating(data: Bundle, key: String?, ratingType: Int): Rating? {
+        return when (ratingType) {
+            RatingCompat.RATING_HEART -> HeartRating(data.getBoolean(key, true))
+            RatingCompat.RATING_THUMB_UP_DOWN -> ThumbRating(data.getBoolean(key, true))
+            RatingCompat.RATING_PERCENTAGE -> PercentageRating(data.getFloat(key, 0f))
+            RatingCompat.RATING_3_STARS, RatingCompat.RATING_4_STARS, RatingCompat.RATING_5_STARS -> StarRating(ratingType, data.getFloat(key, 0f))
+            else -> null
         }
     }
 
-    fun setRating(data: Bundle, key: String?, rating: RatingCompat) {
+    fun setRating(data: Bundle, key: String?, rating: Rating) {
         if (!rating.isRated) return
-        val ratingType = rating.ratingStyle
-        if (ratingType == RatingCompat.RATING_HEART) {
-            data.putBoolean(key, rating.hasHeart())
-        } else if (ratingType == RatingCompat.RATING_THUMB_UP_DOWN) {
-            data.putBoolean(key, rating.isThumbUp)
-        } else if (ratingType == RatingCompat.RATING_PERCENTAGE) {
-            data.putDouble(key, rating.percentRating.toDouble())
-        } else {
-            data.putDouble(key, rating.starRating.toDouble())
+        when (rating) {
+            is HeartRating -> data.putBoolean(key, rating.isHeart)
+            is ThumbRating -> data.putBoolean(key, rating.isThumbsUp)
+            is PercentageRating -> data.putDouble(key, rating.percent.toDouble())
+            is StarRating -> data.putDouble(key, rating.starRating.toDouble())
         }
     }
 

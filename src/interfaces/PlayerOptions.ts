@@ -84,16 +84,6 @@ export interface PlayerOptions {
    */
   androidAudioContentType?: AndroidAudioContentType;
   /**
-   * Indicates whether the player should automatically delay playback in order to minimize stalling.
-   * Defaults to `true`.
-   * @deprecated This option has been nominated for removal in a future version
-   * of RNTP. If you have this set to `true`, you can safely remove this from
-   * the options. If you are setting this to `false` and have a reason for that,
-   * please post a comment in the following discussion: https://github.com/doublesymmetry/react-native-track-player/pull/1695
-   * and describe why you are doing so.
-   */
-  waitForBuffer?: boolean;
-  /**
    * Indicates whether the player should automatically update now playing metadata data in control center / notification.
    * Defaults to `true`.
    */

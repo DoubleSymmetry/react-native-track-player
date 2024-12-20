@@ -2,13 +2,13 @@ import {
   AppRegistry,
   DeviceEventEmitter,
   NativeEventEmitter,
-  Platform,
+  Platform
 } from 'react-native';
 
-import TrackPlayer from './TrackPlayerModule';
-import { Event, RepeatMode, State } from './constants';
+import { AndroidAutoContentStyle, Event, RepeatMode } from './constants';
 import type {
   AddTrack,
+  AndroidAutoBrowseTree,
   EventPayloadByEvent,
   NowPlayingMetadata,
   PlaybackState,
@@ -20,11 +20,13 @@ import type {
   UpdateOptions,
 } from './interfaces';
 import resolveAssetSource from './resolveAssetSource';
+import TrackPlayer from './TrackPlayerModule';
 
-const emitter =
-  Platform.OS !== 'android'
-    ? new NativeEventEmitter(TrackPlayer)
-    : DeviceEventEmitter;
+const isAndroid = Platform.OS === 'android';
+
+const emitter = !isAndroid
+  ? new NativeEventEmitter(TrackPlayer)
+  : DeviceEventEmitter;
 
 // MARK: - Helpers
 
@@ -47,23 +49,20 @@ function resolveImportedAsset(id?: number) {
 /**
  * Initializes the player with the specified options.
  *
- * Note that on Android this method must only be called while the app is in the
- * foreground, otherwise it will throw an error with code
- * `'android_cannot_setup_player_in_background'`. In this case you can wait for
- * the app to be in the foreground and try again.
- *
  * @param options The options to initialize the player with.
  * @see https://rntp.dev/docs/api/functions/lifecycle
  */
-export async function setupPlayer(options: PlayerOptions = {}): Promise<void> {
-  return TrackPlayer.setupPlayer(options);
+export async function setupPlayer(
+  options: PlayerOptions = {}
+): Promise<void> {
+  return TrackPlayer.setupPlayer(options)
 }
 
 /**
  * Register the playback service. The service will run as long as the player runs.
  */
 export function registerPlaybackService(factory: () => ServiceHandler) {
-  if (Platform.OS === 'android') {
+  if (isAndroid) {
     // Registers the headless task
     AppRegistry.registerHeadlessTask('TrackPlayer', factory);
   } else if (Platform.OS === 'web') {
@@ -81,13 +80,6 @@ export function addEventListener<T extends Event>(
     : (event: EventPayloadByEvent[T]) => void
 ) {
   return emitter.addListener(event, listener);
-}
-
-/**
- * @deprecated This method should not be used, most methods reject when service is not bound.
- */
-export function isServiceRunning(): Promise<boolean> {
-  return TrackPlayer.isServiceRunning();
 }
 
 // MARK: - Queue API
@@ -219,16 +211,10 @@ export async function skipToPrevious(initialPosition = -1): Promise<void> {
  * @param options The options to update.
  * @see https://rntp.dev/docs/api/functions/player#updateoptionsoptions
  */
-export async function updateOptions({
-  alwaysPauseOnInterruption,
-  ...options
-}: UpdateOptions = {}): Promise<void> {
+export async function updateOptions(options: UpdateOptions = {}): Promise<void> {
   return TrackPlayer.updateOptions({
     ...options,
     android: {
-      // Handle deprecated alwaysPauseOnInterruption option:
-      alwaysPauseOnInterruption:
-        options.android?.alwaysPauseOnInterruption ?? alwaysPauseOnInterruption,
       ...options.android,
     },
     icon: resolveImportedAsset(options.icon),
@@ -257,15 +243,6 @@ export async function updateMetadataForTrack(
     ...metadata,
     artwork: resolveImportedAssetOrPath(metadata.artwork),
   });
-}
-
-/**
- * @deprecated Nominated for removal in the next major version. If you object
- * to this, please describe your use-case in the following issue:
- * https://github.com/doublesymmetry/react-native-track-player/issues/1653
- */
-export function clearNowPlayingMetadata(): Promise<void> {
-  return TrackPlayer.clearNowPlayingMetadata();
 }
 
 /**
@@ -437,53 +414,12 @@ export async function getActiveTrack(): Promise<Track | undefined> {
 }
 
 /**
- * Gets the index of the current track or null if there is no current track.
- *
- * @deprecated use `TrackPlayer.getActiveTrackIndex()` instead.
- */
-export async function getCurrentTrack(): Promise<number | null> {
-  return TrackPlayer.getActiveTrackIndex();
-}
-
-/**
- * Gets the duration of the current track in seconds.
- * @deprecated Use `TrackPlayer.getProgress().then((progress) => progress.duration)` instead.
- */
-export async function getDuration(): Promise<number> {
-  return TrackPlayer.getDuration();
-}
-
-/**
- * Gets the buffered position of the current track in seconds.
- *
- * @deprecated Use `TrackPlayer.getProgress().then((progress) => progress.buffered)` instead.
- */
-export async function getBufferedPosition(): Promise<number> {
-  return TrackPlayer.getBufferedPosition();
-}
-
-/**
- * Gets the playback position of the current track in seconds.
- * @deprecated Use `TrackPlayer.getProgress().then((progress) => progress.position)` instead.
- */
-export async function getPosition(): Promise<number> {
-  return TrackPlayer.getPosition();
-}
-
-/**
  * Gets information on the progress of the currently active track, including its
  * current playback position in seconds, buffered position in seconds and
  * duration in seconds.
  */
 export async function getProgress(): Promise<Progress> {
   return TrackPlayer.getProgress();
-}
-
-/**
- * @deprecated use (await getPlaybackState()).state instead.
- */
-export async function getState(): Promise<State> {
-  return (await TrackPlayer.getPlaybackState()).state;
 }
 
 /**
@@ -509,4 +445,72 @@ export async function getRepeatMode(): Promise<RepeatMode> {
  */
 export async function retry() {
   return TrackPlayer.retry();
+}
+
+/**
+ * Sets the content hierarchy of Android Auto (Android only). The hierarchy structure is a dict with
+ * the mediaId as keys, and a list of MediaItem as values. To use, you must at least specify the root directory, where
+ * the key is "/". If the root directory contains BROWSABLE MediaItems, they will be shown as tabs. Do note Google requires
+ * AA to have a max of 4 tabs. You may then set the mediaId keys of the browsable MediaItems to be a list of other MediaItems.
+ *
+ * @param browseTree the content hierarchy dict.
+ * @returns a serialized copy of the browseTree set by native. For debug purposes.
+ */
+export async function setBrowseTree(
+  browseTree: AndroidAutoBrowseTree
+): Promise<string> {
+  if (!isAndroid) return new Promise(() => '');
+  return TrackPlayer.setBrowseTree(browseTree);
+}
+
+/**
+ * this method enables android auto playback progress tracking; see
+ * https://developer.android.com/training/cars/media#browse-progress-bar
+ * android only.
+ * @param mediaID the mediaID.
+ * @returns
+ */
+export async function setPlaybackState(mediaID: string): Promise<void> {
+  if (!isAndroid) return;
+  TrackPlayer.setPlaybackState(mediaID);
+}
+
+/**
+ * Sets the content style of Android Auto (Android only).
+ * there are list style and grid style. see https://developer.android.com/training/cars/media#apply_content_style .
+ * the styles are applicable to browsable nodes and playable nodes. setting the args to true will yield the list style.
+ * false = the grid style.
+ */
+export function setBrowseTreeStyle(
+  browsableStyle: AndroidAutoContentStyle,
+  playableStyle: AndroidAutoContentStyle
+): null {
+  if (!isAndroid) return null;
+  TrackPlayer.setBrowseTreeStyle(browsableStyle, playableStyle);
+  return null;
+}
+
+/**
+ * acquires the wake lock of MusicService (android only.)
+ */
+export async function acquireWakeLock() {
+  if (!isAndroid) return;
+  TrackPlayer.acquireWakeLock();
+}
+
+/**
+ * acquires the wake lock of MusicService (android only.)
+ */
+export async function abandonWakeLock() {
+  if (!isAndroid) return;
+  TrackPlayer.abandonWakeLock();
+}
+
+/**
+ * get onStartCommandIntent is null or not (Android only.). this is used to identify
+ * if musicservice is restarted or not.
+ */
+export async function validateOnStartCommandIntent(): Promise<boolean> {
+  if (!isAndroid) return true;
+  return TrackPlayer.validateOnStartCommandIntent();
 }

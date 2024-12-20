@@ -56,3 +56,11 @@ example/ios/Pods
 ios/Pods
 ios/RNTrackPlayer.xcworkspace
 Podfile.lock
+
+# Yarn
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions

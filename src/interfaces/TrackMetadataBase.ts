@@ -13,6 +13,8 @@ export interface TrackMetadataBase {
   artwork?: string;
   /** track description */
   description?: string;
+  /** track mediaId */
+  mediaId?: string;
   /** The track genre */
   genre?: string;
   /** The track release date in [RFC 3339](https://www.ietf.org/rfc/rfc3339.txt) */

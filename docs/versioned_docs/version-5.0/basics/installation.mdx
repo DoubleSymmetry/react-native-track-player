@@ -1,0 +1,109 @@
+---
+sidebar_position: 1
+---
+
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# Installation
+
+
+## Stable
+
+<Tabs groupId="pkg">
+  <TabItem value="npm" label="NPM" default>
+
+    npm install --save react-native-track-player
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+    yarn add react-native-track-player
+
+  </TabItem>
+</Tabs>
+
+## Unstable / Nightly
+
+If for some reason you require an update that has not yet been officially
+released you can install the `nightly` version which is an automatic release of
+`main` published to npm every 24hrs.
+
+<Tabs groupId="pkg">
+  <TabItem value="npm" label="NPM" default>
+
+    npm install --save react-native-track-player@nightly
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+    yarn add react-native-track-player@nightly
+
+  </TabItem>
+</Tabs>
+
+## iOS Setup
+
+iOS requires a few extra steps that are _not_ required for Android/Web.
+
+### Enable Swift Modules
+
+Because the iOS module uses Swift, if the user is using a standard react-native application they'll need to add support for Swift in the project. This can be easily by adding a swift file to the Xcode project -- could be called `dummy.swift` and saying yes when prompted if you'd like to generate a bridging header.
+
+![Importing Swift](https://i.imgur.com/CBqBcWs.png)
+
+### Pod Install
+
+You'll need to run a `pod install` in order to install the native iOS dependencies
+
+```sh
+cd ios && pod install
+```
+
+## Web Setup
+
+RNTP is available on web. The web implementation leverages [shaka-player](https://github.com/shaka-project/shaka-player)
+which is an optional peer dependency of the RNTP. If you want to deploy the web
+platform you'll need to install `shaka-player` directly in your project:
+
+<Tabs groupId="pkg">
+  <TabItem value="npm" label="NPM" default>
+
+    npm install --save shaka-player
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+    yarn add shaka-player
+
+  </TabItem>
+</Tabs>
+
+You may need to [enable transmuxing support](../troubleshooting.md#web-issues-with-hls-streams)
+if you're using HLS streams with MPEG2-TS content.
+
+<Tabs groupId="pkg">
+  <TabItem value="npm" label="NPM" default>
+
+    npm install --save mux.js
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+    yarn add mux.js
+
+  </TabItem>
+</Tabs>
+
+## Expo
+
+You can now use React Native Track Player with Expo. 
+
+Please be aware that while many people are using React Native Track Player with Expo successfully, the current maintainers of this project do not use Expo and their ability to resolve issues involving Expo is limited.
+
+To get started, create a [custom development client](https://docs.expo.dev/clients/getting-started/) for your Expo app and then install React Native Track Player.
+
+Here is the configuration required for audio playback in background:
+
+- [iOS: Enable audio playback in background via your app.json](https://docs.expo.dev/versions/latest/sdk/audio/#playing-or-recording-audio-in-background)
+- [Android: Stop playback when the app is closed](./background-mode.md/#android)

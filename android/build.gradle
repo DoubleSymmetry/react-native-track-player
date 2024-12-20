@@ -1,3 +1,5 @@
+import com.android.Version
+
 buildscript {
     repositories {
         mavenLocal()
@@ -5,7 +7,7 @@ buildscript {
         google()
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:4.2.2'
+        classpath 'com.android.tools.build:gradle:8.7.1'
         classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.8.10"
     }
 }
@@ -13,20 +15,25 @@ buildscript {
 apply plugin: 'com.android.library'
 apply plugin: 'kotlin-android'
 
-def getExtOrIntegerDefault(name) {
-    return rootProject.ext.has(name) ? rootProject.ext.get(name) : (project.properties['RNTP_' + name]).toInteger()
+def getExtOrIntegerDefault(name, defaultInt) {
+    try {
+        return rootProject.ext.has(name) ? rootProject.ext.get(name) : (project.properties['RNTP_' + name]).toInteger()
+    } catch (ignored) {
+        return defaultInt
+    }
 }
 
 android {
-    compileSdkVersion getExtOrIntegerDefault('compileSdkVersion')
-    namespace 'com.doublesymmetry.trackplayer'
+    compileSdkVersion getExtOrIntegerDefault('compileSdkVersion', 34)
 
+    def agpVersion = Version.ANDROID_GRADLE_PLUGIN_VERSION
+    if (agpVersion.tokenize('.')[0].toInteger() >= 7) {
+      namespace "com.doublesymmetry.trackplayer"
+    }
     defaultConfig {
-        minSdkVersion getExtOrIntegerDefault('minSdkVersion') // RN's minimum version
-        targetSdkVersion getExtOrIntegerDefault('targetSdkVersion')
+        minSdkVersion getExtOrIntegerDefault('minSdkVersion', 23) // RN's minimum version
+        targetSdkVersion getExtOrIntegerDefault('targetSdkVersion', 34)
 
-        versionCode 300
-        versionName '3.0'
 
         consumerProguardFiles 'proguard-rules.txt'
     }
@@ -34,6 +41,12 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
+    }
+    if (rootProject.ext.has("native")) {
+        kotlinOptions {
+            // HACK: does RN auto sets to 17? or am i crazy?
+            jvmTarget = "1.8"
+        }
     }
 }
 
@@ -50,16 +63,38 @@ repositories {
 }
 
 dependencies {
-    implementation 'com.github.doublesymmetry:kotlinaudio:v2.1.0'
-    // used when building against local maven
-//    implementation "com.github.doublesymmetry:kotlin-audio:2.1.0"
-
     //noinspection GradleDynamicVersion
-    implementation "com.facebook.react:react-native:+"
-
+    if (rootProject.ext.has("native")) {
+        implementation "com.facebook.react:react-android:+"
+    } else {
+        implementation "com.facebook.react:react-native:+"
+    }
     // Make sure we're using androidx
-    implementation "androidx.core:core-ktx:1.9.0"
+    implementation "androidx.core:core-ktx:1.13.1"
     implementation "androidx.localbroadcastmanager:localbroadcastmanager:1.1.0"
-    implementation "androidx.lifecycle:lifecycle-process:2.5.1"
-    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.6.3"
+    implementation "androidx.lifecycle:lifecycle-process:2.8.6"
+    implementation 'androidx.media:media:1.7.0'
+
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
+    implementation("androidx.activity:activity-compose:1.9.3")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-graphics")
+
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-session:1.4.1")
+    implementation("androidx.media3:media3-ui:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-dash:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-smoothstreaming:1.4.1")
+    implementation("androidx.media3:media3-common:1.4.1")
+
+    implementation "com.google.guava:guava:33.0.0-android"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-guava:1.8.0"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3"
+
+    implementation 'io.coil-kt:coil:2.4.0'
+    api 'com.jakewharton.timber:timber:5.0.1'
+
+    implementation 'androidx.test:rules:1.6.1'
+    implementation 'jp.wasabeef.transformers:coil:1.0.6'
 }
