@@ -1,5 +1,6 @@
 package com.doublesymmetry.trackplayer.service
 
+import android.annotation.SuppressLint
 import android.app.*
 import android.content.Context
 import android.content.Intent
@@ -9,14 +10,18 @@ import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.provider.Settings
+import android.support.v4.media.MediaBrowserCompat.MediaItem
 import android.support.v4.media.RatingCompat
+import android.util.Log
 import androidx.annotation.MainThread
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationCompat.PRIORITY_LOW
+import androidx.media.utils.MediaConstants
 import com.doublesymmetry.kotlinaudio.models.*
 import com.doublesymmetry.kotlinaudio.models.NotificationButton.*
 import com.doublesymmetry.kotlinaudio.players.QueuedAudioPlayer
-import com.doublesymmetry.trackplayer.R as TrackPlayerR
+import com.doublesymmetry.trackplayer.HeadlessJsMediaService
 import com.doublesymmetry.trackplayer.extensions.NumberExt.Companion.toMilliseconds
 import com.doublesymmetry.trackplayer.extensions.NumberExt.Companion.toSeconds
 import com.doublesymmetry.trackplayer.extensions.asLibState
@@ -29,23 +34,33 @@ import com.doublesymmetry.trackplayer.module.MusicEvents
 import com.doublesymmetry.trackplayer.module.MusicEvents.Companion.METADATA_PAYLOAD_KEY
 import com.doublesymmetry.trackplayer.utils.BundleUtils
 import com.doublesymmetry.trackplayer.utils.BundleUtils.setRating
-import com.facebook.react.HeadlessJsTaskService
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.jstasks.HeadlessJsTaskConfig
 import com.facebook.react.modules.core.DeviceEventManagerModule
-import com.google.android.exoplayer2.ui.R as ExoPlayerR
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.flow
+import timber.log.Timber
 import java.util.concurrent.TimeUnit
 import kotlin.system.exitProcess
-import timber.log.Timber
+import com.doublesymmetry.trackplayer.R as TrackPlayerR
+import com.google.android.exoplayer2.ui.R as ExoPlayerR
 
 @MainThread
-class MusicService : HeadlessJsTaskService() {
+class MusicService : HeadlessJsMediaService() {
     private lateinit var player: QueuedAudioPlayer
     private val binder = MusicBinder()
     private val scope = MainScope()
     private var progressUpdateJob: Job? = null
+    var mediaTree: Map<String, List<MediaItem>> = HashMap()
+    var mediaTreeStyle: List<Int> = listOf(
+        MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM,
+        MediaConstants.DESCRIPTION_EXTRAS_VALUE_CONTENT_STYLE_LIST_ITEM)
+
+    @ExperimentalCoroutinesApi
+    override fun onCreate() {
+        Timber.tag("GVA-RNTP").d("RNTP musicservice created.")
+        super.onCreate()
+    }
 
     /**
      * Use [appKilledPlaybackBehavior] instead.
@@ -53,6 +68,58 @@ class MusicService : HeadlessJsTaskService() {
     @Deprecated("This will be removed soon")
     var stoppingAppPausesPlayback = true
         private set
+
+    @SuppressLint("VisibleForTests")
+    override fun onGetRoot(
+            clientPackageName: String,
+            clientUid: Int,
+            rootHints: Bundle?
+    ): BrowserRoot {
+        // TODO: verify clientPackageName here.
+        Timber.tag("RNTP-AA").d(clientPackageName + " attempted to get Browsable root.")
+        if (clientPackageName in arrayOf<String>(
+                "com.android.systemui",
+                "com.example.android.mediacontroller",
+                "com.google.android.projection.gearhead"
+        )) {
+            val reactActivity = reactNativeHost.reactInstanceManager.currentReactContext?.currentActivity
+            if (
+                // HACK: validate reactActivity is present; if not, send wake intent
+                (reactActivity == null || reactActivity.isDestroyed)
+                && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                && Settings.canDrawOverlays(this)
+                ) {
+                Log.d("RNTP-AA", clientPackageName + " is in the white list of waking activity.")
+                val activityIntent = packageManager.getLaunchIntentForPackage(packageName)
+                activityIntent!!.data = Uri.parse("trackplayer://service-bound")
+                activityIntent.action = Intent.ACTION_VIEW
+                activityIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                startActivity(activityIntent)
+            }
+        }
+        val extras = Bundle()
+        extras.putInt(
+            MediaConstants.DESCRIPTION_EXTRAS_KEY_CONTENT_STYLE_BROWSABLE,
+            mediaTreeStyle[0]
+        )
+        extras.putInt(
+            MediaConstants.DESCRIPTION_EXTRAS_KEY_CONTENT_STYLE_PLAYABLE,
+            mediaTreeStyle[1]
+        )
+        return BrowserRoot("/", extras)
+    }
+
+    override fun onLoadChildren(
+            parentMediaId: String,
+            result: Result<List<MediaItem>>
+    ) {
+        Timber.tag("GVA-RNTP").d("RNTP received loadChildren req: %s", parentMediaId)
+
+        emit(MusicEvents.BUTTON_BROWSE, Bundle().apply {
+            putString("mediaId", parentMediaId)
+        });
+        result.sendResult(mediaTree[parentMediaId])
+    }
 
     enum class AppKilledPlaybackBehavior(val string: String) {
         CONTINUE_PLAYBACK("continue-playback"), PAUSE_PLAYBACK("pause-playback"), STOP_PLAYBACK_AND_REMOVE_NOTIFICATION("stop-playback-and-remove-notification")
@@ -155,9 +222,34 @@ class MusicService : HeadlessJsTaskService() {
         )
 
         val automaticallyUpdateNotificationMetadata = playerOptions?.getBoolean(AUTO_UPDATE_METADATA, true) ?: true
+        val mediaSessionCallback = object: AAMediaSessionCallBack {
+            override fun handlePlayFromMediaId(mediaId: String?, extras: Bundle?) {
+                Timber.tag("GVA-RNTP").d("RNTP received req to play from mediaID: %s", mediaId)
+                val emitBundle = extras ?: Bundle()
+                emit(MusicEvents.BUTTON_PLAY_FROM_ID, emitBundle.apply {
+                    putString("id", mediaId)
+                })
+            }
 
-        player = QueuedAudioPlayer(this@MusicService, playerConfig, bufferConfig, cacheConfig)
+            override fun handlePlayFromSearch(query: String?, extras: Bundle?) {
+                Timber.tag("GVA-RNTP").d("RNTP received req to play from query: %s", query)
+                val emitBundle = extras ?: Bundle()
+                emit(MusicEvents.BUTTON_PLAY_FROM_SEARCH, emitBundle.apply {
+                    putString("query", query)
+                })
+            }
+
+            override fun handleSkipToQueueItem(id: Long) {
+                Timber.tag("GVA-RNTP").d("RNTP received req to play from queue index: %d", id)
+                val emitBundle = Bundle()
+                emit(MusicEvents.BUTTON_SKIP, emitBundle.apply {
+                    putInt("index", id.toInt())
+                })
+            }
+        }
+        player = QueuedAudioPlayer(this@MusicService, playerConfig, bufferConfig, cacheConfig, mediaSessionCallback)
         player.automaticallyUpdateNotificationMetadata = automaticallyUpdateNotificationMetadata
+        sessionToken = player.getMediaSessionToken()
         observeEvents()
         setupForegrounding()
     }
@@ -761,8 +853,13 @@ class MusicService : HeadlessJsTaskService() {
     }
 
     @MainThread
-    override fun onBind(intent: Intent?): IBinder {
-        return binder
+    override fun onBind(intent: Intent?): IBinder? {
+        val intentAction = intent?.action
+        return if (intentAction != null) {
+            super.onBind(intent)
+        } else {
+            binder
+        }
     }
 
     @MainThread

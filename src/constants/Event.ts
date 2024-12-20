@@ -117,7 +117,11 @@ export enum Event {
    **/
   RemoteSkip = 'remote-skip',
   /**
-   * (iOS only) Fired when chapter metadata is received.
+   * (Android only) Fired when the user enters a browsable children in android auto.
+   * See https://rntp.dev/docs/api/events#remoteBrowse
+   **/
+  RemoteBrowse = 'remote-browse',
+  /** (iOS only) Fired when chapter metadata is received.
    * See https://rntp.dev/docs/api/events#chaptermetadatareceived
    **/
   MetadataChapterReceived = 'metadata-chapter-received',

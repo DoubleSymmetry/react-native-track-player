@@ -14,7 +14,10 @@ import {
   View,
   Platform,
 } from 'react-native';
-import TrackPlayer, { useActiveTrack } from 'react-native-track-player';
+import TrackPlayer, {
+  useActiveTrack,
+  AndroidAutoContentStyle,
+} from 'react-native-track-player';
 
 import {
   Button,
@@ -26,6 +29,7 @@ import {
   TrackInfo,
 } from './components';
 import { QueueInitialTracksService, SetupService } from './services';
+import DemoAndroidAutoHierarchy from './services/AndroidAutoHierarchy';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import BottomSheet from '@gorhom/bottom-sheet';
 import { SponsorCard } from './components/SponsorCard';
@@ -151,6 +155,11 @@ function useSetupPlayer() {
     let unmounted = false;
     (async () => {
       await SetupService();
+      TrackPlayer.setBrowseTree(DemoAndroidAutoHierarchy);
+      TrackPlayer.setBrowseTreeStyle(
+        AndroidAutoContentStyle.CategoryList,
+        AndroidAutoContentStyle.Grid
+      );
       if (unmounted) return;
       setPlayerReady(true);
       const queue = await TrackPlayer.getQueue();
