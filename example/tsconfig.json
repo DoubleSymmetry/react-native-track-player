@@ -1,5 +1,5 @@
 {
-  "extends": "./node_modules/@tsconfig/react-native/tsconfig.json",
+  "extends": "@react-native/typescript-config/tsconfig.json",
   "compilerOptions": {
     "paths": {
       "react-native-track-player": [
