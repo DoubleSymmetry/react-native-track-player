@@ -16,7 +16,7 @@ object BundleUtils {
         val obj = data[key]
         if (obj is String) {
             // Remote or Local Uri
-            if (obj.trim { it <= ' ' }.isEmpty()) throw RuntimeException("$key: The URL cannot be empty")
+            if (obj.trim { it <= ' ' }.isEmpty()) return null
             return Uri.parse(obj as String?)
         } else if (obj is Bundle) {
             // require/import
